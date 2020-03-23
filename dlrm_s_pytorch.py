@@ -155,6 +155,10 @@ class DLRM_Net(nn.Module):
                 EE.embs.weight.data = torch.tensor(W, requires_grad=True)
 
             else:
+                #embeddingbagは入力データに前後関係がない場合に使用され、入力を一次元にすることでメモリと計算量を効率化している
+                #ただし、一次元にすると各レコードの切れ目がわからないのでfoward計算をするときはoffsetをともに入力する、後のlS_oがそれである。
+                #出力は普通のembeddingの出力を列方向に足し合わせたものである(でも結局入力の特徴量で1が立ってるのが１つだけなのであまり変わらない気もする)
+            
                 EE = nn.EmbeddingBag(n, m, mode="sum", sparse=True)
 
                 # initialize embeddings
@@ -264,8 +268,11 @@ class DLRM_Net(nn.Module):
         if self.arch_interaction_op == "dot":
             # concatenate dense and sparse features
             (batch_size, d) = x.shape
+            #xとlyをcatして次元を合わせる
+            #viewではdenseとsparseの特徴量の間で内積を取るために行列を整形しているview(バッチサイズ,各特徴量の次元数,特徴量の個数(26次元))となっている
             T = torch.cat([x] + ly, dim=1).view((batch_size, -1, d))
-            # perform a dot product
+            # 内積　perform a dot product
+            # bmmで行列積を計算する
             Z = torch.bmm(T, torch.transpose(T, 1, 2))
             # append dense feature with the interactions (into a row vector)
             # approach 1: all
@@ -276,9 +283,13 @@ class DLRM_Net(nn.Module):
             # offset = 0 if self.arch_interaction_itself else -1
             # li, lj = torch.tril_indices(ni, nj, offset=offset)
             # approach 2: custom
+            # mlptopの入力にするため次元をもとに戻す
+            # 行列積の対角成分を抜き出すことで、内積としている
             offset = 1 if self.arch_interaction_itself else 0
             li = torch.tensor([i for i in range(ni) for j in range(i + offset)])
             lj = torch.tensor([j for i in range(nj) for j in range(i + offset)])
+            # li,lj:[1,2,2,3,3,3,4,4,4,4,...,ni(nj)]となっているつまりZflatは
+            # ある行列の対角成分を取ってきている(各要素の取ってくる個数は異なる)
             Zflat = Z[:, li, lj]
             # concatenate dense features and interactions
             R = torch.cat([x] + [Zflat], dim=1)
@@ -552,12 +563,14 @@ if __name__ == "__main__":
     ln_bot = np.fromstring(args.arch_mlp_bot, dtype=int, sep="-")
     # input data
     if (args.data_generation == "dataset"):
-
+        #データの準備
+        #train_data,test_dataはtorch.DataSetのインスタンス
+        #train_ld,test_ldはtrain_data,test_dataを使ったtorch.DataLoaderのインスタンス
         train_data, train_ld, test_data, test_ld = \
             dp.make_criteo_data_and_loaders(args)
         nbatches = args.num_batches if args.num_batches > 0 else len(train_ld)
         nbatches_test = len(test_ld)
-
+        #embedding層で特徴量のuniqueな値の数が必要なためここで渡している
         ln_emb = train_data.counts
         # enforce maximum limit on number of vectors per embedding
         if args.max_ind_range > 0:
@@ -597,7 +610,7 @@ if __name__ == "__main__":
     arch_mlp_top_adjusted = str(num_int) + "-" + args.arch_mlp_top
     ln_top = np.fromstring(arch_mlp_top_adjusted, dtype=int, sep="-")
 
-    # sanity check: feature sizes and mlp dimensions must match
+    # sanity check: 特徴量の次元とmlpの次元数が合致しているか確認
     if m_den != ln_bot[0]:
         sys.exit(
             "ERROR: arch-dense-feature-size "
@@ -705,10 +718,10 @@ if __name__ == "__main__":
     # the weights we need to start from the same random seed.
     # np.random.seed(args.numpy_rand_seed)
     dlrm = DLRM_Net(
-        m_spa,
-        ln_emb,
-        ln_bot,
-        ln_top,
+        m_spa,#sparse特徴量の次元数
+        ln_emb,#長さ26の配列、各特徴量のuniqueが格納されている
+        ln_bot,#dense featureの入力を受けて、sparse featureを入力とするembedding層の出力と内積を取るところまでのmlpの各層のノードの数
+        ln_top,#denseとsparseの特徴量をあわせた後のmlpの各層のノード数
         arch_interaction_op=args.arch_interaction_op,
         arch_interaction_itself=args.arch_interaction_itself,
         sigmoid_bot=-1,
@@ -754,11 +767,12 @@ if __name__ == "__main__":
         optimizer = torch.optim.SGD(dlrm.parameters(), lr=args.learning_rate)
 
     ### main loop ###
+    #計算時間測る
     def time_wrap(use_gpu):
         if use_gpu:
             torch.cuda.synchronize()
         return time.time()
-
+    #foward計算
     def dlrm_wrap(X, lS_o, lS_i, use_gpu, device):
         if use_gpu:  # .cuda()
             # lS_i can be either a list of tensors or a stacked tensor.
@@ -774,7 +788,7 @@ if __name__ == "__main__":
             )
         else:
             return dlrm(X, lS_o, lS_i)
-
+    #loss計算
     def loss_fn_wrap(Z, T, use_gpu, device):
         if args.loss_function == "mse" or args.loss_function == "bce":
             if use_gpu:
@@ -875,7 +889,11 @@ if __name__ == "__main__":
 
             if args.mlperf_logging:
                 previous_iteration_time = None
-
+            #各エポックの学習のループ
+            #X:数値特徴量(densen feature)
+            #lS_o:カテゴリカル特徴量(sparse feature)をembeddingする時のoffset
+            #lS_i:カテゴリカル特徴量
+            #T:target,正解データ
             for j, (X, lS_o, lS_i, T) in enumerate(train_ld):
                 if j < skip_upto_batch:
                     continue
@@ -893,27 +911,11 @@ if __name__ == "__main__":
                 # early exit if nbatches was set by the user and has been exceeded
                 if nbatches > 0 and j >= nbatches:
                     break
-                '''
-                # debug prints
-                print("input and targets")
-                print(X.detach().cpu().numpy())
-                print([np.diff(S_o.detach().cpu().tolist()
-                       + list(lS_i[i].shape)).tolist() for i, S_o in enumerate(lS_o)])
-                print([S_i.detach().cpu().numpy().tolist() for S_i in lS_i])
-                print(T.detach().cpu().numpy())
-                '''
-
                 # forward pass
                 Z = dlrm_wrap(X, lS_o, lS_i, use_gpu, device)
 
                 # loss
                 E = loss_fn_wrap(Z, T, use_gpu, device)
-                '''
-                # debug prints
-                print("output and loss")
-                print(Z.detach().cpu().numpy())
-                print(E.detach().cpu().numpy())
-                '''
                 # compute loss and accuracy
                 L = E.detach().cpu().numpy()  # numpy array
                 S = Z.detach().cpu().numpy()  # numpy array
