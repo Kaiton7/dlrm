@@ -1,3 +1,25 @@
+## この学習の特徴
+リコメンドを学習する際に数値データとカテゴリカル・データを同時に効率よく学習できる。
+さらに、ドメイン知識を用いたデータの前処理などが不要で高い精度を出せる。(Criteo Kaggle Display Advertising Challenge)
+
+##　入力データ
+13個の数値特徴量と26個のカテゴリカル特徴量が入力、入力データは一行が1組のデータになっている。
+データが欠損値の場合はタブが変わりに入れられている。
+
+## networkの構造
+下のDescriptionにも記述があるが、denseにmlpを通したものsparseにembeddingを通したものをつなげてそれらの内積を計算し、それを入力とするmlpの出力を最終的なものとする。
+embedding層にはembeddingbagを使用してメモリと計算量の効率化を図っている
+
+## pytorchを使用したCriteo Kaggle Display Advertisingデータに対する実行
+ここ[Criteo Kaggle Display Advertising Challenge Dataset](https://labs.criteo.com/2014/02/kaggle-display-advertising-challenge-dataset/)からデータをダウンロードして、inputディレクトリの下にtrai.txtをcopyする
+以下のコマンドを実行する
+```
+python3 dlrm_s_pytorch.py --use-gpu --arch-sparse-feature-size=16 --arch-mlp-bot="13-512-256-64-16" --arch-mlp-top="512-256-1" --data-generation=dataset --data-set=kaggle --raw-data-file=./input/train.txt --processed-data-file=./input/kaggleAdDisplayChallenge_processed.npz --loss-function=bce --round-targets=True --learning-rate=0.1 --mini-batch-size=128 --print-freq=1024 --print-time --test-mini-batch-size=16384 --test-num-workers=16 $dlrm_extra_option 2>&1 | tee run_kaggle_pt.log
+```
+
+
+
+以下folk元の文章
 Deep Learning Recommendation Model for Personalization and Recommendation Systems:
 =================================================================================
 *Copyright (c) Facebook, Inc. and its affiliates.*
